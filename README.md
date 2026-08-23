@@ -106,7 +106,11 @@ deliberate trade: it costs pack size and buys you no CDN entry to allow in a
 Content Security Policy, no third party able to change what runs in your origin,
 and no offline failure. The eval-backed font path is disabled
 (`isEvalSupported: false`), which is the mitigation for CVE-2024-4367 in this
-build.
+build — set at call time, so the library itself is unmodified.
+
+pdf.js is Mozilla's, under the **Apache License 2.0**, and is included as
+distributed. The attribution is in [LICENSE](LICENSE); the MIT terms there cover
+this component's own code and not pdf.js.
 
 **No inline event handlers.** Every control is bound from the portalled script
 and reads its data from attributes, so a filename containing an apostrophe cannot

@@ -1,0 +1,878 @@
+@portal(bodyEnd, id: "com.trumpetstudio.pdfviewer.script", includeOnce: true)
+<script>
+/* The singleton test checks for the engine's own initAll rather than for any
+   truthy value, as Windfall's does. Browsers expose every element with an id as
+   a property of window, so an element or a named frame called rwPdfViewer made
+   the old test find it, skip the engine and leave every viewer on the page
+   without Print, Email or its touch path. The read sits in a try because a
+   frame from another origin throws on any property read. */
+window.rwPdfViewer = (function () {
+    try {
+        var existing = window.rwPdfViewer;
+        if (existing && typeof existing.initAll === 'function') { return existing; }
+    } catch (e) { /* not ours, whatever it is */ }
+    return null;
+})() || (function () {
+    /* pdf.js 3.11.174, bundled under assets/page/ and served from this site.
+
+       It used to load from a public CDN with a subresource-integrity hash on the
+       main script. That hash was correct, but it could only ever cover half the
+       problem: pdf.js starts its worker itself via workerSrc, and integrity
+       metadata does not apply to Worker construction — so the larger of the two
+       files was fetched from a third party with nothing verifying it. Anyone able
+       to serve a different worker from that URL (a CDN compromise, a hijacked DNS
+       answer, a hostile proxy) ran arbitrary JavaScript in this site's origin.
+
+       Serving both from the same origin removes the third party altogether, and
+       with it the integrity attribute, the crossOrigin dance, the CDN entry a
+       strict CSP would otherwise need, and the offline failure. Cost is about
+       1.4 MB of pack size, which for a component whose entire job is rendering
+       documents is the right trade.
+
+       Upgrading: replace both files under assets/page/ and keep the
+       isEvalSupported flag below. */
+    var PDFJS_URL = '{{assetPath}}/pdf.min.js';
+    var WORKER_URL = '{{assetPath}}/pdf.worker.min.js';
+    var libPromise = null;
+
+    /* One pdf.js worker for every viewer on the page. Left to itself,
+       getDocument() starts a worker per document: a page of seven PDFs on a
+       phone started seven threads, each parsing the same megabyte of script
+       (measured 30 Oct 2026). A worker the caller hands in is shared, and
+       pdf.js never destroys one it did not create, so closing one document
+       leaves the others running. Anything that stops PDFWorker being made
+       falls back to pdf.js's own per-document worker, as before. */
+    var sharedWorker = null;
+    function workerFor(lib) {
+        if (!sharedWorker && typeof lib.PDFWorker === 'function') {
+            try { sharedWorker = new lib.PDFWorker({ name: 'rw-pdf-viewer' }); } catch (e) { sharedWorker = null; }
+        }
+        return sharedWorker || undefined;
+    }
+
+    // All touch devices (iPhone, iPad, Android). Only fine-pointer desktops keep
+    // the native iframe. The second clause catches iPadOS, which reports a
+    // desktop UA and a fine pointer; maxTouchPoints is the reliable tell.
+    // navigator.platform is deprecated, so the Mac check now reads the user
+    // agent instead. The Mac test must stay: maxTouchPoints alone would also
+    // match a Windows touchscreen laptop driven by a mouse, which reports a
+    // fine pointer and is better served by the native iframe it gets today.
+    function isTouchDevice() {
+        return (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
+            (navigator.maxTouchPoints > 1 && /Mac/i.test(navigator.userAgent || ''));
+    }
+
+    function loadLib() {
+        if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+        if (!libPromise) {
+            libPromise = new Promise(function (resolve, reject) {
+                var s = document.createElement('script');
+                s.src = PDFJS_URL;
+                s.onload = function () {
+                    /* On a page with an AMD loader (RequireJS and the like),
+                       pdf.js registers itself with that loader instead of
+                       setting window.pdfjsLib, and nothing here asks the loader
+                       for it. A throw in this handler would leave the promise
+                       pending and the stage blank for good, so reject instead:
+                       the caller's catch then shows the Open PDF card. */
+                    var lib = window.pdfjsLib;
+                    if (!lib || !lib.GlobalWorkerOptions) {
+                        reject(new Error('pdf.js did not set window.pdfjsLib'));
+                        return;
+                    }
+                    lib.GlobalWorkerOptions.workerSrc = WORKER_URL;
+                    resolve(lib);
+                };
+                s.onerror = reject;
+                document.head.appendChild(s);
+            });
+        }
+        return libPromise;
+    }
+
+    /* Everything this file builds sits directly on the stage, whose colour is
+       whichever colour the author picked from the theme palette in Background,
+       from build 17 on — light or dark, that one colour and no other. Before
+       that it was always a light grey, so the toolbar, its buttons and the card
+       were all drawn near-black on the assumption that something pale was
+       behind them. Against a dark choice — the case the setting was added for —
+       that is a black panel on a black stage: still there, entirely unreadable.
+
+       So the chrome measures what actually landed. A fully transparent answer
+       means no background class reached the element, which is what an instance
+       placed before the setting existed looks like, so the walk carries on up
+       to whatever is painting behind it; nothing opaque anywhere falls back to
+       light, the colour this component used to be.
+
+       WCAG relative luminance rather than a quick Rec. 709 luma, because the
+       set is then chosen by comparing the two candidates' actual contrast
+       against the measured colour instead of by a threshold picked to look
+       about right. The two cross over around a mid grey, and that crossing is
+       the worst case: roughly 4.1:1, just under AA, and unavoidable while the
+       text colours are near-white and near-black rather than pure. Everywhere
+       either side of that narrow band clears AA comfortably, and the extremes
+       this setting exists for — a black site, a white one — are far outside
+       it. */
+    function luminance(css) {
+        var m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,/\s]+([\d.]+))?/
+            .exec(css || '');
+        if (!m) return null;
+        if (m[4] !== undefined && parseFloat(m[4]) <= 0.5) return null;  // see-through
+        var lin = [+m[1], +m[2], +m[3]].map(function (v) {
+            v /= 255;
+            return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        });
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+    }
+
+    function contrast(a, b) {
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    }
+
+    /* Luminance of the first ancestor actually painting something, or null. */
+    function bgLuminance(el) {
+        if (!window.getComputedStyle) return null;
+        for (var node = el; node && node.nodeType === 1; node = node.parentNode) {
+            var l = luminance(getComputedStyle(node).backgroundColor);
+            if (l !== null) return l;
+        }
+        return null;
+    }
+
+    /* panel/panelText are the floating toolbar and the Open PDF button — the
+       same pair of colours doing the same job twice: a solid block that has to
+       separate from the stage behind it. text/dim are words sitting straight on
+       the stage, and they are what decides which set is used. */
+    var LIGHT_BG = {
+        text: '#111827', dim: '#374151',
+        panel: 'rgba(17,24,39,.88)', panelText: '#ffffff',
+        btn: 'rgba(255,255,255,.18)', btnText: '#ffffff'
+    };
+    var DARK_BG = {
+        text: '#f9fafb', dim: '#d1d5db',
+        panel: 'rgba(249,250,251,.94)', panelText: '#111827',
+        btn: 'rgba(17,24,39,.10)', btnText: '#111827'
+    };
+    var LUM_TEXT_LIGHT_BG = 0.0092;   // #111827
+    var LUM_TEXT_DARK_BG  = 0.9670;   // #f9fafb
+
+    function chromeFor(el) {
+        var bg = bgLuminance(el);
+        if (bg === null) return LIGHT_BG;
+        return contrast(LUM_TEXT_DARK_BG, bg) > contrast(LUM_TEXT_LIGHT_BG, bg)
+            ? DARK_BG : LIGHT_BG;
+    }
+
+    /* label is spoken by assistive tech; txt is the visible glyph. They are
+       separate arguments because using the glyph for both makes a screen reader
+       announce "left single angle quotation mark" instead of "Previous page". */
+    function makeBtn(txt, label, pal, fn) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = txt;
+        b.setAttribute('aria-label', label);
+        b.setAttribute('title', label);
+        b.style.cssText = 'min-width:36px;height:32px;border:0;border-radius:6px;' +
+            'background:' + pal.btn + ';color:' + pal.btnText + ';font-size:17px;' +
+            'line-height:1;display:inline-flex;align-items:center;justify-content:center;';
+        b.addEventListener('click', fn);
+        return b;
+    }
+
+    function openLink(url, text, css) {
+        var a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = text;
+        a.style.cssText = css;
+        return a;
+    }
+
+    /* Origin means scheme, host and port together, so http and https on one
+       host count as different, and so does a media subdomain. The same test the
+       audio packs use.
+
+       An address that cannot be parsed is treated as same-origin, so a browser
+       without URL support behaves exactly as it did before this check existed. */
+    function isCrossOrigin(href) {
+        if (!href || typeof window.URL !== 'function') return false;
+        try {
+            return new window.URL(href, location.href).origin !== location.origin;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /* The download attribute is honoured for same-origin addresses only. Point
+       it at a CDN, a bucket or a media subdomain and every current browser
+       ignores it, filename hint included, and follows the link as an ordinary
+       navigation: the visitor leaves the page and lands on the bare file, with
+       nothing downloaded. No component code can grant itself that permission
+       and no header on the other server changes it, so the honest move is to
+       stop promising a download and open the file in a new tab instead, which
+       at least leaves the page behind it where it was.
+
+       The visible word changes with the spoken name. A button that reads
+       Download and is announced as something else fails anyone who operates it
+       by voice, since what they say is what they see. */
+    function applyDownloadPolicy(a) {
+        if (!isCrossOrigin(a.getAttribute('href'))) return;
+        a.removeAttribute('download');
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener');
+        a.setAttribute('aria-label', 'Open PDF in a new tab');
+        a.setAttribute('title', 'Open in a new tab');
+        var word = a.querySelector('span');
+        if (word) word.textContent = 'Open';
+    }
+
+    /* WebKit will not allocate a canvas whose backing store is larger than 4096
+       x 4096 pixels of area on iPhone and iPad, and every iOS browser is WebKit.
+       Past it the allocation fails, the page goes blank, and nothing says why.
+       The backing store is the page's on-screen size times devicePixelRatio, and
+       zoom goes to 4x, so a US Letter page crossed the line at the sixth Zoom in
+       on a 3x iPhone and the fourth on a 2x iPad.
+
+       So the pixel ratio gives way and the size does not: the page keeps growing
+       on screen with every step, and only its sharpness stops rising once the
+       budget is spent, which is what Mozilla's own viewer does with its
+       maxCanvasPixels setting. Ten per cent of headroom, because iOS also caps
+       the canvas memory a page may hold in total. */
+    var MAX_CANVAS_AREA = 16777216 * 0.9;
+
+    function pixelRatio(cssWidth, cssHeight) {
+        var ratio = window.devicePixelRatio || 1;
+        var area = cssWidth * cssHeight;
+        if (area > 0 && area * ratio * ratio > MAX_CANVAS_AREA) {
+            ratio = Math.sqrt(MAX_CANVAS_AREA / area);
+        }
+        return ratio;
+    }
+
+    /* Present to a screen reader, absent to the eye. */
+    var SPOKEN_ONLY = 'position:absolute;width:1px;height:1px;padding:0;margin:-1px;' +
+        'overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;';
+
+    /* Shown where the canvas viewer could not be built — in practice a document
+       on a CDN or media subdomain sending no CORS header, though a 404 or a
+       corrupt file arrive here too. Built as a finished panel rather than a bare
+       blue link, so the last resort still looks like part of the component
+       instead of like a crash.
+
+       No document title on the card. The component header renders docTitle
+       directly above this stage and does so unconditionally, so naming the
+       document here put the same words on screen twice, one under the other.
+
+       The wording no longer blames the browser. "This browser cannot display the
+       document in the page" was both wrong — the refusal belongs to the server
+       that withheld the header, not to Safari — and longer than the moment
+       deserves. What the reader needs is that the inline preview is off and
+       there is a way through, so the button carries the panel and is sized to:
+       past the 44px minimum touch target on every phone, where the old 10px
+       padding left it a little under. */
+    function openCard(url, pal) {
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'position:absolute;inset:0;display:flex;' +
+            'flex-direction:column;align-items:center;justify-content:center;' +
+            'gap:20px;padding:24px;text-align:center;color:' + pal.dim + ';' +
+            'font:400 15px system-ui,-apple-system,sans-serif;';
+
+        var note = document.createElement('p');
+        note.textContent = "Preview isn't available";
+        note.style.cssText = 'margin:0;font-size:17px;color:' + pal.text + ';';
+
+        wrap.appendChild(note);
+        wrap.appendChild(openLink(url, 'Open PDF',
+            'display:inline-flex;align-items:center;justify-content:center;' +
+            'min-height:56px;padding:16px 40px;border-radius:12px;' +
+            'background:' + pal.panel + ';color:' + pal.panelText + ';font-size:18px;' +
+            'font-weight:600;text-decoration:none;'));
+        return wrap;
+    }
+
+    /* Reached when the canvas viewer cannot be built. By far the commonest cause
+       is a PDF on another origin whose server sends no Access-Control-Allow-Origin
+       header: getDocument() reads the file with a fetch, which CORS governs,
+       while the iframe the desktop path uses is a navigation, which it does not.
+       A document that renders perfectly on a laptop therefore fails here and only
+       here, and nothing in the desktop view hints that it will. A 404, a file
+       behind auth and a corrupt document land here too.
+
+       No component code can render a no-CORS cross-origin file — the browser
+       will not hand over the bytes — so the job is to fall back to whatever this
+       particular browser can still do, and never to a blank rectangle.
+
+       This is a touch-only path. The one route here runs through upgrade(), and
+       both of its callers gate on isTouchDevice(), so a desktop browser never
+       arrives — which is what condemned the iframe this used to fall back to.
+
+       Builds 12 to 14 chose between that iframe and the card on
+       navigator.pdfViewerEnabled, which reports whether the browser renders PDFs
+       inline. True of iOS Safari, and useless: inside an iframe WebKit paints
+       page one, cropped, with no way to scroll or reach page two — the exact
+       mess this function exists to prevent. The property asked a fair question
+       of the wrong surface. Chrome on Android answers false and already got the
+       card; iOS answered true and got the wreck. Since no touch browser is
+       served by an iframe here, nothing is chosen any more.
+
+       The card is not a consolation prize on iOS. Open PDF hands the file to
+       Quick Look, which pinch-zooms, pages through the whole document, prints
+       and shares — a better reader than the canvas viewer it stands in for. */
+    function inlineFallback(stage, url) {
+        if (window.console && console.warn) {
+            console.warn('[PDF Viewer] pdf.js could not read "' + url + '". If ' +
+                'that file is on another domain, its server must send an ' +
+                'Access-Control-Allow-Origin header before phones and tablets ' +
+                'can show it in the page. Hosting the PDF on the same site as ' +
+                'the page avoids this entirely.');
+        }
+
+        var pal = chromeFor(stage);
+        stage.innerHTML = '';
+        stage.appendChild(openCard(url, pal));
+    }
+
+    /* pdf.js is 1.4 MB. Against a cross-origin file with no header that is 1.4 MB
+       pulled over cellular to arrive at a throw, with the reader watching an
+       empty stage for all of it before being told the document cannot be shown.
+       One ranged byte settles the same question first: a browser that refuses
+       this refuses getDocument() too, for the same reason and at the same wall.
+
+       Deliberately narrow. Only a rejected promise short-circuits — a network or
+       CORS failure, where there is no response to look at. Any HTTP reply at all,
+       404 and 403 included, is passed through to pdf.js, which reads the body and
+       says something more useful about a missing or corrupt file than a bare
+       status could. Reachability is the whole of what is being asked.
+
+       Range is what makes this preflighted when cross-origin, which is the point:
+       it fails in the same way, at the same hop, as the read it stands in for. A
+       server that ignores Range instead answers 200 and starts sending the entire
+       document, so the body is cancelled as soon as the headers land — without
+       that, the transfer this exists to save is spent on the probe itself.
+
+       No fetch means a browser old enough to predate it: skip the probe and let
+       pdf.js fail the way it did before, rather than block the path on it. */
+    function probe(url) {
+        if (!window.fetch) return Promise.resolve();
+        return fetch(url, { headers: { 'Range': 'bytes=0-0' } }).then(function (r) {
+            if (r.body && r.body.cancel) {
+                try { r.body.cancel(); } catch (e) {}
+            }
+        });
+    }
+
+    function mobileViewer(stage, url, title) {
+        probe(url).then(function () {
+            return loadLib();
+        }).then(function (pdfjsLib) {
+            /* isEvalSupported:false disables the eval-backed font path. pdf.js
+               builds before 4.2.67 execute attacker-controlled JavaScript in this
+               page's origin through it (CVE-2024-4367) when handed a crafted PDF,
+               and the bundled build is older than that. Turning it off costs
+               nothing on ordinary documents.
+
+               disableStream and disableAutoFetch keep a phone from downloading
+               the whole document to show one page of it. Both default to false,
+               and with streaming on pdf.js reads the plain GET it opens to the
+               very end in the background, cancelling it only when streaming is
+               off; range requests for the pages in view then run on top of it.
+               Measured on a live 79 MB book with every CORS header in place:
+               79,099,641 bytes in one stream to show page one, against 915,193
+               bytes over a dozen range requests with both flags set. Turning off
+               streaming alone is not enough, because auto-fetch would then go on
+               to request every remaining chunk in turn.
+
+               A server that cannot answer ranges still works: pdf.js notices
+               and reads the whole file once, which is what happened before. The
+               cost is a range round trip for each page not yet seen. */
+            return pdfjsLib.getDocument({
+                url: url,
+                worker: workerFor(pdfjsLib),
+                isEvalSupported: false,
+                disableStream: true,
+                disableAutoFetch: true
+            }).promise;
+        }).then(function (pdf) {
+            var state = { page: 1, zoom: 1 };
+            var pal = chromeFor(stage);
+
+            stage.innerHTML = '';
+
+            /* Transparent rather than a colour of its own: the stage it covers
+               already carries the Background setting, and naming a second one
+               here would quietly overrule it. The canvas keeps its own white
+               below — that is the document's paper, not component chrome.
+
+               The scrollbar gutter is reserved so that a classic scrollbar
+               appearing for a tall page cannot change the width the page was
+               just fitted to. Overlay scrollbars, which is every phone, ignore
+               it. */
+            var scroller = document.createElement('div');
+            scroller.style.cssText = 'position:absolute;left:0;right:0;top:0;bottom:44px;' +
+                'overflow:auto;-webkit-overflow-scrolling:touch;scrollbar-gutter:stable;' +
+                'background:transparent;';
+
+            /* A bitmap says nothing to a screen reader, and clearing the stage
+               just threw away the frame whose title was the viewer's only name.
+               So the canvas is an image named for the page it shows. Zero-sized
+               until a page is drawn, so a viewer built while hidden does not
+               show the browser's default blank 300 by 150 box. */
+            var canvas = document.createElement('canvas');
+            canvas.width = 0;
+            canvas.height = 0;
+            canvas.style.cssText = 'display:block;margin:0 auto;background:#fff;';
+            canvas.setAttribute('role', 'img');
+            scroller.appendChild(canvas);
+
+            var bar = document.createElement('div');
+            bar.style.cssText = 'position:absolute;left:0;right:0;bottom:0;height:44px;' +
+                'display:flex;align-items:center;justify-content:center;gap:12px;' +
+                'background:' + pal.panel + ';color:' + pal.panelText + ';' +
+                'font:500 13px system-ui,-apple-system,sans-serif;';
+
+            /* The counter is a polite live region, so Next and Previous are
+               heard as well as seen. It is spoken as "Page 2 of 12" rather than
+               read out glyph by glyph: the slash form is for the eye only. It
+               is filled in before it joins the page, so arriving says nothing:
+               a viewer can be built at any moment while someone scrolls past,
+               and only a page turn is worth interrupting them for. */
+            var label = document.createElement('span');
+            label.setAttribute('aria-live', 'polite');
+            label.setAttribute('aria-atomic', 'true');
+            label.style.cssText = 'min-width:52px;text-align:center;';
+            var shown = document.createElement('span');
+            shown.setAttribute('aria-hidden', 'true');
+            var spoken = document.createElement('span');
+            spoken.style.cssText = SPOKEN_ONLY;
+            label.appendChild(shown);
+            label.appendChild(spoken);
+
+            function showPage() {
+                var n = state.page, of = pdf.numPages;
+                shown.textContent = n + ' / ' + of;
+                spoken.textContent = 'Page ' + n + ' of ' + of;
+                canvas.setAttribute('aria-label',
+                    'Page ' + n + ' of ' + of + (title ? ', ' + title : ''));
+            }
+
+            /* The same route to the file the failure card offers, kept in reach
+               once the page renders: Quick Look on iOS is the better reader of
+               the two, and for a screen reader it is the only way into the text
+               at all. Worded where there is room, an arrow where there is not;
+               it is announced as Open PDF either way. */
+            var openBtn = openLink(url, 'Open PDF',
+                'min-width:36px;height:32px;border-radius:6px;' +
+                'display:inline-flex;align-items:center;justify-content:center;' +
+                'background:' + pal.btn + ';color:' + pal.btnText + ';' +
+                'font-weight:600;line-height:1;text-decoration:none;white-space:nowrap;');
+            openBtn.setAttribute('aria-label', 'Open PDF');
+            openBtn.setAttribute('title', 'Open PDF');
+
+            /* Five controls and a counter in one 44px row is tight on a small
+               phone, and the room depends on fonts nobody here chooses, so the
+               row is measured rather than guessed: the worded link first, then
+               the arrow, then a narrower gap. */
+            function fitBar() {
+                openBtn.textContent = 'Open PDF';
+                openBtn.style.padding = '0 10px';
+                openBtn.style.fontSize = '13px';
+                bar.style.gap = '12px';
+                if (!(bar.scrollWidth > bar.clientWidth)) return;
+                openBtn.textContent = '↗';
+                openBtn.style.padding = '0';
+                openBtn.style.fontSize = '17px';
+                if (!(bar.scrollWidth > bar.clientWidth)) return;
+                bar.style.gap = '6px';
+            }
+
+            /* The width the page was last fitted to, and the one before it.
+               Zero means never: the viewer was built inside something hidden, a
+               closed tab, accordion or modal, where there is no width to fit. */
+            var laidOutAt = 0;
+            var laidOutBefore = 0;
+            function fitWidth() {
+                return scroller.clientWidth || stage.clientWidth || 0;
+            }
+
+            var rendering = false;
+            var pending = false;
+            function render() {
+                /* A render already in flight is not a reason to drop this one.
+                   The caller has already advanced state.page, so returning early
+                   leaves the canvas showing the old page while the counter reads
+                   the new one, and the next tap appears to skip. Remember that a
+                   pass is due and run it when this one settles. */
+                if (rendering) { pending = true; return; }
+                /* Hidden: drawing now would size the page to nothing. The size
+                   watcher below draws it the moment it has a width. */
+                var width = fitWidth();
+                if (!width) return;
+                if (width !== laidOutAt) {
+                    laidOutBefore = laidOutAt;
+                    laidOutAt = width;
+                    fitBar();
+                }
+                rendering = true;
+                pdf.getPage(state.page).then(function (page) {
+                    var base = page.getViewport({ scale: 1 });
+                    var fit = width / base.width;
+                    var vp = page.getViewport({ scale: fit * state.zoom });
+                    var ratio = pixelRatio(vp.width, vp.height);
+                    canvas.width = Math.floor(vp.width * ratio);
+                    canvas.height = Math.floor(vp.height * ratio);
+                    canvas.style.width = Math.floor(vp.width) + 'px';
+                    canvas.style.height = Math.floor(vp.height) + 'px';
+                    var ctx = canvas.getContext('2d');
+                    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+                    return page.render({ canvasContext: ctx, viewport: vp }).promise;
+                }).then(function () {
+                    showPage();
+                }).catch(function (e) {
+                    /* One bad page must not wedge the viewer for the rest, but a
+                       blank page with no explanation anywhere is how the canvas
+                       size limit above stayed hidden, so it is said once here. */
+                    if (window.console && console.warn) {
+                        console.warn('[PDF Viewer] page ' + state.page + ' could not be drawn.', e);
+                    }
+                }).then(function () {
+                    rendering = false;
+                    if (pending) { pending = false; render(); }
+                });
+            }
+
+            bar.appendChild(makeBtn('‹', 'Previous page', pal, function () {
+                if (state.page > 1) { state.page--; scroller.scrollTop = 0; render(); }
+            }));
+            bar.appendChild(label);
+            bar.appendChild(makeBtn('›', 'Next page', pal, function () {
+                if (state.page < pdf.numPages) { state.page++; scroller.scrollTop = 0; render(); }
+            }));
+            bar.appendChild(makeBtn('−', 'Zoom out', pal, function () {
+                state.zoom = Math.max(0.5, state.zoom / 1.25);
+                render();
+            }));
+            bar.appendChild(makeBtn('+', 'Zoom in', pal, function () {
+                state.zoom = Math.min(4, state.zoom * 1.25);
+                render();
+            }));
+            bar.appendChild(openBtn);
+            showPage();
+
+            stage.appendChild(scroller);
+            stage.appendChild(bar);
+
+            /* The resize listener and the parsed document both outlive the stage
+               unless they are torn down: the listener closes over pdf, canvas and
+               scroller, and PDFDocumentProxy keeps the document alive inside the
+               pdf.js worker. Several PDFs on a page, or an editor canvas that
+               re-renders, accumulate both. Watch for the stage leaving the DOM
+               and release them.
+
+               This one stays document-wide and stays on published pages, unlike
+               the re-scan observer at the foot of this file. Two reasons: its
+               callback is a single isConnected check rather than a document
+               query, and narrowing it to stage.parentNode would break the exact
+               case it exists for — the canvas replaces the whole component root,
+               which detaches the parent without ever mutating that parent's own
+               child list. It also disconnects itself the moment it fires.
+
+               Size is watched on the scroller itself where the browser can, not
+               only on the window. Opening a tab, an accordion or a modal changes
+               the viewer's width without the window ever resizing, so a viewer
+               built while hidden used to stay a blank 0 by 0 until somebody
+               happened to tap a button. And only a real change of width redraws:
+               iOS fires resize as its toolbar slides in and out during a scroll,
+               and every redraw clears the canvas first, so each one blinked the
+               page for nothing. The first draw after being hidden goes at once;
+               later ones wait for the resizing to settle.
+
+               One loop is cut off by name. Where scrollbars take up room and the
+               gutter above is not supported, a page drawn to fit can bring in a
+               scrollbar, which narrows the scroller, which redraws the page
+               narrower, which can let the scrollbar go again. A change of a few
+               pixels straight back to the width before last is that loop, and
+               it is left alone rather than chased. */
+            var resizeTimer = null;
+            function onResize() {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(function () {
+                    var width = fitWidth();
+                    if (!width || width === laidOutAt) return;
+                    if (width === laidOutBefore && Math.abs(width - laidOutAt) <= 24) return;
+                    render();
+                }, laidOutAt ? 200 : 0);
+            }
+            window.addEventListener('resize', onResize);
+            var sizeWatch = null;
+            if (typeof window.ResizeObserver === 'function') {
+                sizeWatch = new window.ResizeObserver(onResize);
+                sizeWatch.observe(scroller);
+            }
+
+            function teardown() {
+                window.removeEventListener('resize', onResize);
+                if (sizeWatch) { sizeWatch.disconnect(); sizeWatch = null; }
+                clearTimeout(resizeTimer);
+                if (pdf && pdf.destroy) { try { pdf.destroy(); } catch (e) {} }
+            }
+
+            if (window.MutationObserver) {
+                var mo = new MutationObserver(function () {
+                    if (!stage.isConnected) { teardown(); mo.disconnect(); }
+                });
+                mo.observe(document.body, { childList: true, subtree: true });
+            }
+
+            render();
+        }).catch(function () {
+            inlineFallback(stage, url);
+        });
+    }
+
+    function upgrade(stage) {
+        if (stage.dataset.rwPdfUpgraded === '1') return;
+        stage.dataset.rwPdfUpgraded = '1';
+        var frame = stage.querySelector('.rw-pdf-frame');
+        if (!frame) return;
+        var url = frame.getAttribute('src') || frame.getAttribute('data-src');
+        if (!url) return;
+        /* Parked as the lazy path parks it, for the same reason: an eager frame
+           has been loading the whole file since the page was parsed, alongside
+           the probe, pdf.js and pdf.js's own fetch of the same file, and only
+           stopped once the stage was emptied. Every outcome from here replaces
+           the frame anyway. */
+        if (frame.getAttribute('src')) {
+            frame.setAttribute('data-src', url);
+            frame.removeAttribute('src');
+        }
+        mobileViewer(stage, url, frame.getAttribute('title') || '');
+    }
+
+    /* Lazy Loading used to reach the desktop path only. On a phone or tablet
+       every viewer without a Title Screen was upgraded the moment the page
+       loaded, wherever it sat: the probe, 1.4 MB of pdf.js and the document
+       itself, for a viewer three screens down or five viewers on one page, all
+       at first paint over cellular, which is the exact case the setting exists
+       for. Now a frame marked lazy waits until its stage comes within about
+       200px of the screen, and the observer that saw it lets go of it.
+
+       The frame's own address is parked in data-src while it waits, where
+       upgrade() already looks for it. Left in place, the browser's built-in
+       lazy loading, which starts well before 200px out, would load the whole
+       file into a frame this script is about to throw away, and then pdf.js
+       would fetch it again. Every outcome from here replaces the frame anyway,
+       with the canvas viewer or the Open PDF card.
+
+       An eager frame, or a browser without IntersectionObserver, is upgraded at
+       once, as before. A stage inside something hidden never intersects, so it
+       also waits until it is shown, rather than being drawn at no width. This
+       is driven from the observer and nothing else: a published page has no
+       re-scan to come back to it. */
+    var nearScreen = null;
+
+    function upgradeWhenNear(stage) {
+        if (stage.dataset.rwPdfUpgraded === '1' || stage.dataset.rwPdfWaiting === '1') return;
+        var frame = stage.querySelector('.rw-pdf-frame');
+        var lazy = !!frame && (frame.getAttribute('loading') || '').toLowerCase() === 'lazy';
+        if (!lazy || typeof window.IntersectionObserver !== 'function') {
+            upgrade(stage);
+            return;
+        }
+        if (!nearScreen) {
+            nearScreen = new window.IntersectionObserver(function (entries) {
+                entries.forEach(function (entry) {
+                    if (!(entry.isIntersecting || entry.intersectionRatio > 0)) return;
+                    nearScreen.unobserve(entry.target);
+                    upgrade(entry.target);
+                });
+            }, { rootMargin: '200px 0px' });
+        }
+        var src = frame.getAttribute('src');
+        if (src) {
+            if (!frame.getAttribute('data-src')) frame.setAttribute('data-src', src);
+            frame.removeAttribute('src');
+        }
+        stage.dataset.rwPdfWaiting = '1';
+        nearScreen.observe(stage);
+    }
+
+    /* Bound here rather than with onclick attributes in the template. The print
+       path in particular used to be interpolated into a JS string literal inside
+       the attribute, so a perfectly ordinary filename containing an apostrophe
+       ("Michael's Warm-Up.pdf") terminated the string and killed the button.
+       Reading it from a data attribute removes that class of failure entirely,
+       and a CSP that allows scripts by nonce or hash no longer blocks these. */
+    function bindControls() {
+        document.querySelectorAll('.rw-pdf-reveal').forEach(function (btn) {
+            if (btn.dataset.rwPdfBound === '1') return;
+            btn.dataset.rwPdfBound = '1';
+            btn.addEventListener('click', function () { api.reveal(btn); });
+        });
+        document.querySelectorAll('.rw-pdf-print').forEach(function (btn) {
+            if (btn.dataset.rwPdfBound === '1') return;
+            btn.dataset.rwPdfBound = '1';
+            btn.addEventListener('click', function () {
+                var path = btn.getAttribute('data-pdf-path');
+                if (path) api.print(path);
+            });
+        });
+        document.querySelectorAll('.rw-pdf-email').forEach(function (btn) {
+            if (btn.dataset.rwPdfBound === '1') return;
+            btn.dataset.rwPdfBound = '1';
+            btn.addEventListener('click', function () {
+                api.email(btn.getAttribute('data-email-subject'));
+            });
+        });
+        document.querySelectorAll('.rw-pdf-download').forEach(function (a) {
+            if (a.dataset.rwPdfBound === '1') return;
+            a.dataset.rwPdfBound = '1';
+            applyDownloadPolicy(a);
+        });
+    }
+
+    function initAll() {
+        bindControls();
+        if (!isTouchDevice()) return;
+        document.querySelectorAll('.rw-pdf-stage').forEach(function (stage) {
+            if (stage.querySelector('.rw-pdf-titlescreen')) return; // handled by reveal()
+            upgradeWhenNear(stage);
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initAll);
+    } else {
+        initAll();
+    }
+
+@if(edit)
+    /* The Elements edit canvas replaces component DOM as you change settings, so
+       the one-shot pass above leaves the replacement markup unwired — View PDF,
+       Print and Email silently stop responding until the project is reopened,
+       which reads as a broken component rather than a stale one. This pack was
+       the only one of the four without this re-scan.
+
+       bindControls() and upgrade() are both idempotent (data-rwPdfBound,
+       data-rwPdfUpgraded), so re-running costs nothing on already-wired nodes.
+       Coalesced to one pass per frame — an un-debounced observer would run a
+       document-wide query on every DOM change the rest of the page makes.
+
+       Edit mode only — and the reason is specific to this pack, not the general
+       "a published page never re-renders this markup". That claim is false, and
+       believing it is what left the three audio packs dead past the first CMS
+       Load More batch until 13 Aug 2026. It cannot happen here for a narrower
+       reason: the document address comes from the PDF File resource control, a
+       resource cannot carry a per-item CMS binding, and the only text controls
+       are the title, screen name and email subject. So a collection cannot
+       render one viewer per item and Load More has no viewer to append.
+
+       Other injection is still real — a lightbox, a tab built on demand, a
+       third-party script. Call window.rwPdfViewer.initAll() from whatever
+       injected it; the idempotence guards above make that free on nodes that
+       are already wired. The pack README says so too, since that is the only
+       place most people will look. Until build 23 that call threw, because the
+       public object never carried initAll, so the one documented remedy for
+       this case failed every time it was used. */
+    if (window.MutationObserver) {
+        var queued = false;
+        var rescan = new MutationObserver(function (records) {
+            if (queued) return;
+            var relevant = false;
+            for (var i = 0; i < records.length && !relevant; i++) {
+                var added = records[i].addedNodes;
+                for (var j = 0; j < added.length; j++) {
+                    if (added[j].nodeType === 1) { relevant = true; break; }
+                }
+            }
+            if (!relevant) return;
+            queued = true;
+            window.requestAnimationFrame(function () { queued = false; initAll(); });
+        });
+        rescan.observe(document.body, { childList: true, subtree: true });
+    }
+@endif
+
+    /* Named so bindControls() can call these, and returned as the public
+       window.rwPdfViewer surface: reveal, print and email as before, and initAll,
+       which the README and the comment above have promised all along and which
+       was never actually exported. It is hoisted and idempotent, so calling it
+       again at any time costs nothing on viewers already wired. */
+    var api = {
+        initAll: initAll,
+        reveal: function (btn) {
+            var stage = btn.closest('.rw-pdf-stage');
+            if (!stage) return;
+            var frame = stage.querySelector('.rw-pdf-frame');
+            var overlay = stage.querySelector('.rw-pdf-titlescreen');
+            if (overlay) overlay.remove();
+            /* The button that was just activated has gone with the overlay, which
+               drops keyboard focus to <body> and loses the reader's place on the
+               page. Move focus to the stage that replaced it instead — tabindex
+               -1 makes it programmatically focusable without adding it to the tab
+               order, and preventScroll stops the page jumping. */
+            stage.setAttribute('tabindex', '-1');
+            if (stage.focus) {
+                try { stage.focus({ preventScroll: true }); } catch (e) { stage.focus(); }
+            }
+            if (isTouchDevice()) {
+                upgrade(stage);
+                return;
+            }
+            if (frame && !frame.getAttribute('src')) {
+                frame.setAttribute('src', frame.getAttribute('data-src'));
+            }
+            if (frame) frame.classList.remove('hidden');
+        },
+        /* A file on another origin cannot be printed from a hidden frame: the
+           frame loads the whole document, print is not reachable across
+           origins, and the new tab the old fallback opened came from the frame's
+           load event, long after the click, so popup blockers ate it. On a 79 MB
+           book that was a full download ending in nothing. Open it in a tab
+           here instead, still inside the click, and let the browser's own
+           viewer print it. The opener is severed by hand rather than through a
+           feature string, because browsers have read a feature string, even
+           noopener alone, as a request for a popup window instead of a tab. */
+        print: function (path) {
+            if (isCrossOrigin(path)) {
+                var tab = window.open(path, '_blank');
+                if (tab) { try { tab.opener = null; } catch (e) {} }
+                return;
+            }
+            var frame = document.createElement('iframe');
+            frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
+            frame.src = path;
+            /* The frame must stay in the document while the print dialog is up -
+               Safari aborts the job if it is removed - so it is cleaned up on a
+               delay rather than immediately. Without this every Print click left
+               another full document parked in the page. */
+            function drop() {
+                if (frame.parentNode) frame.parentNode.removeChild(frame);
+            }
+            frame.onload = function () {
+                try {
+                    frame.contentWindow.focus();
+                    frame.contentWindow.print();
+                    setTimeout(drop, 60000);
+                } catch (e) {
+                    drop();
+                    window.open(path, '_blank');
+                }
+            };
+            frame.onerror = drop;
+            document.body.appendChild(frame);
+        },
+        /* Subject comes from the Inspector; the previous hard-coded string was
+           not editable or translatable. Falls back to the old text so an
+           existing instance with no stored value behaves exactly as before. */
+        email: function (subject) {
+            var s = (subject && String(subject).trim()) || 'Look at this great PDF I found!';
+            window.location.href = 'mailto:?subject=' + encodeURIComponent(s) +
+                '&body=' + encodeURIComponent(window.location.href);
+        }
+    };
+
+    return api;
+})();
+</script>
+@endportal

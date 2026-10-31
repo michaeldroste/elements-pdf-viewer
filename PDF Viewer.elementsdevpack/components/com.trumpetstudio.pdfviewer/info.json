@@ -1,0 +1,17 @@
+{
+  "identifier": "com.trumpetstudio.pdfviewer",
+  "author": "Michael Droste",
+  "title": "PDF Viewer",
+  "group": "Media",
+  "helpURL": "https://github.com/michaeldroste/elements-pdf-viewer/releases/",
+  "requiresPhp": false,
+  "deploy": true,
+  "tags": [
+    "pdf",
+    "viewer",
+    "document",
+    "download",
+    "print",
+    "email"
+  ]
+}

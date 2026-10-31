@@ -1,0 +1,11 @@
+{
+  "name": "PDF Viewer",
+  "identifier": "com.trumpetstudio.pdfviewerpack",
+  "author": "Michael Droste",
+  "version": 2,
+  "build": 28,
+  "categories": [
+    "components",
+    "templates"
+  ]
+}

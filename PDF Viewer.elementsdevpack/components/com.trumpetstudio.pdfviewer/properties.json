@@ -1,0 +1,425 @@
+{
+    "groups": [
+        {
+            "title": "PDF Viewer",
+            "icon": "doc.text",
+            "properties": [
+                {
+                    "title": "Document",
+                    "heading": {}
+                },
+                {
+                    "title": "PDF File",
+                    "id": "pdf",
+                    "ai": {
+                        "name": "pdf",
+                        "description": "The PDF file to display, chosen from project resources or dropped onto the component."
+                    },
+                    "resource": {
+                        "accepts": "application/pdf,.pdf"
+                    }
+                },
+                {
+                    "title": "Title",
+                    "id": "docTitle",
+                    "ai": {
+                        "name": "docTitle",
+                        "description": "Title shown in the header bar, and used as the accessible name of the document frame."
+                    },
+                    "responsive": false,
+                    "text": {
+                        "default": "PDF Document"
+                    }
+                },
+                {
+                    "title": "Loading",
+                    "heading": {}
+                },
+                {
+                    "title": "Lazy Loading",
+                    "id": "lazyLoad",
+                    "ai": {
+                        "name": "lazyLoad",
+                        "description": "Whether the document loads only as it scrolls into view."
+                    },
+                    "responsive": false,
+                    "switch": {
+                        "trueValue": "lazy",
+                        "falseValue": "eager",
+                        "default": true
+                    }
+                },
+                {
+                    "title": "Title Screen",
+                    "id": "titleScreen",
+                    "ai": {
+                        "name": "titleScreen",
+                        "description": "Whether a cover screen with a View PDF button is shown before the document loads."
+                    },
+                    "responsive": false,
+                    "switch": {
+                        "default": false
+                    }
+                },
+                {
+                    "title": "Name",
+                    "id": "screenName",
+                    "ai": {
+                        "name": "screenName",
+                        "description": "Optional heading on the cover screen, shown above the document title.",
+                        "visible": "titleScreen == true"
+                    },
+                    "responsive": false,
+                    "visible": "titleScreen == true",
+                    "text": {
+                        "default": ""
+                    }
+                },
+                {
+                    "title": "Screen Title Size",
+                    "id": "screenTitleSize",
+                    "ai": {
+                        "name": "screenTitleSize",
+                        "description": "Text size of the cover screen heading.",
+                        "visible": "titleScreen == true"
+                    },
+                    "visible": "titleScreen == true",
+                    "select": {
+                        "default": "text-2xl",
+                        "items": [
+                            {
+                                "value": "text-base",
+                                "title": "Small"
+                            },
+                            {
+                                "value": "text-xl",
+                                "title": "Medium"
+                            },
+                            {
+                                "value": "text-2xl",
+                                "title": "Large"
+                            },
+                            {
+                                "value": "text-3xl",
+                                "title": "Extra Large"
+                            },
+                            {
+                                "value": "text-4xl",
+                                "title": "Huge"
+                            },
+                            {
+                                "value": "text-5xl",
+                                "title": "Massive"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "title": "Screen Title Color",
+                    "id": "screenTitleColor",
+                    "ai": {
+                        "name": "screenTitleColor",
+                        "description": "Text colour of the cover screen heading.",
+                        "visible": "titleScreen == true"
+                    },
+                    "visible": "titleScreen == true",
+                    "format": "text-{{value}}",
+                    "themeColor": {
+                        "default": {
+                            "name": "surface",
+                            "brightness": 800
+                        }
+                    }
+                },
+                {
+                    "title": "Style",
+                    "heading": {}
+                },
+                {
+                    "title": "Background",
+                    "id": "viewerBg",
+                    "info": "Any colour from your theme's palette, light or dark, used exactly as picked. Fills the component body, the area around the document and the cover screen. The pages of the document itself are drawn by the browser's own PDF viewer and keep their own colours.",
+                    "ai": {
+                        "name": "viewerBg",
+                        "description": "Background colour of the component body, the document stage and the cover screen. Any colour in the site theme's palette, at any brightness, with no separate dark-mode value."
+                    },
+                    "format": "bg-{{value}}",
+                    "themeColor": {
+                        "mode": "single",
+                        "default": {
+                            "name": "surface",
+                            "brightness": 50
+                        }
+                    }
+                },
+                {
+                    "title": "Header Color",
+                    "id": "headerColor",
+                    "ai": {
+                        "name": "headerColor",
+                        "description": "Background colour of the header and toolbar bars."
+                    },
+                    "format": "bg-{{value}}",
+                    "themeColor": {
+                        "default": {
+                            "name": "brand",
+                            "brightness": 600
+                        }
+                    }
+                },
+                {
+                    "title": "Header Text",
+                    "id": "headerTextColor",
+                    "ai": {
+                        "name": "headerTextColor",
+                        "description": "Text colour of the header bar."
+                    },
+                    "format": "text-{{value}}",
+                    "themeColor": {
+                        "default": {
+                            "name": "surface",
+                            "brightness": 50
+                        }
+                    }
+                },
+                {
+                    "title": "Header Title Size",
+                    "id": "titleSize",
+                    "ai": {
+                        "name": "titleSize",
+                        "description": "Text size of the header title."
+                    },
+                    "select": {
+                        "default": "text-base",
+                        "items": [
+                            {
+                                "value": "text-sm",
+                                "title": "Small"
+                            },
+                            {
+                                "value": "text-base",
+                                "title": "Medium"
+                            },
+                            {
+                                "value": "text-lg",
+                                "title": "Large"
+                            },
+                            {
+                                "value": "text-xl",
+                                "title": "Extra Large"
+                            },
+                            {
+                                "value": "text-2xl",
+                                "title": "Huge"
+                            },
+                            {
+                                "value": "text-3xl",
+                                "title": "Massive"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "title": "Border Color",
+                    "id": "borderColor",
+                    "ai": {
+                        "name": "borderColor",
+                        "description": "Border colour around the whole component."
+                    },
+                    "format": "border-{{value}}",
+                    "themeColor": {
+                        "default": {
+                            "name": "surface",
+                            "brightness": 300
+                        }
+                    }
+                },
+                {
+                    "title": "Border Width",
+                    "id": "borderWidth",
+                    "ai": {
+                        "name": "borderWidth",
+                        "description": "Border thickness around the whole component."
+                    },
+                    "select": {
+                        "default": "border",
+                        "items": [
+                            {
+                                "value": "border-0",
+                                "title": "None"
+                            },
+                            {
+                                "value": "border",
+                                "title": "Thin"
+                            },
+                            {
+                                "value": "border-2",
+                                "title": "Medium"
+                            },
+                            {
+                                "value": "border-4",
+                                "title": "Thick"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "title": "Corner Radius",
+                    "id": "cornerRadius",
+                    "ai": {
+                        "name": "cornerRadius",
+                        "description": "Corner rounding of the whole component."
+                    },
+                    "select": {
+                        "default": "rounded-lg",
+                        "items": [
+                            {
+                                "value": "rounded-none",
+                                "title": "None"
+                            },
+                            {
+                                "value": "rounded-md",
+                                "title": "Small"
+                            },
+                            {
+                                "value": "rounded-lg",
+                                "title": "Medium"
+                            },
+                            {
+                                "value": "rounded-2xl",
+                                "title": "Large"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "title": "Viewer Height",
+                    "id": "viewerHeight",
+                    "ai": {
+                        "name": "viewerHeight",
+                        "description": "Height of the document area, from 320 pixels to full screen."
+                    },
+                    "select": {
+                        "default": "h-96",
+                        "items": [
+                            {
+                                "value": "h-80",
+                                "title": "Small (320px)"
+                            },
+                            {
+                                "value": "h-96",
+                                "title": "Medium (384px)"
+                            },
+                            {
+                                "value": "h-[32rem]",
+                                "title": "Large (512px)"
+                            },
+                            {
+                                "value": "h-[42rem]",
+                                "title": "Extra Large (672px)"
+                            },
+                            {
+                                "value": "h-[48rem]",
+                                "title": "Huge (768px)"
+                            },
+                            {
+                                "value": "h-[56rem]",
+                                "title": "Massive (896px)"
+                            },
+                            {
+                                "value": "h-screen",
+                                "title": "Full Screen"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "title": "Toolbar",
+                    "heading": {}
+                },
+                {
+                    "title": "Print Button",
+                    "id": "showPrint",
+                    "ai": {
+                        "name": "showPrint",
+                        "description": "Whether a Print button is shown in the toolbar."
+                    },
+                    "responsive": false,
+                    "switch": {
+                        "default": true
+                    }
+                },
+                {
+                    "title": "Download Button",
+                    "id": "showDownload",
+                    "ai": {
+                        "name": "showDownload",
+                        "description": "Whether a Download button is shown in the toolbar."
+                    },
+                    "responsive": false,
+                    "switch": {
+                        "default": true
+                    }
+                },
+                {
+                    "title": "Email Button",
+                    "id": "showEmail",
+                    "ai": {
+                        "name": "showEmail",
+                        "description": "Whether an Email button is shown in the toolbar, which opens a mail message linking to this page."
+                    },
+                    "responsive": false,
+                    "switch": {
+                        "default": true
+                    }
+                },
+                {
+                    "title": "Email Subject",
+                    "id": "emailSubject",
+                    "responsive": false,
+                    "info": "Subject line used by the Email button. The page address is placed in the body.",
+                    "ai": {
+                        "name": "emailSubject",
+                        "description": "Subject line for the share-by-email button.",
+                        "visible": "showEmail == true"
+                    },
+                    "text": {
+                        "default": "Look at this great PDF I found!",
+                        "placeholder": "Look at this great PDF I found!"
+                    },
+                    "visible": "showEmail == true"
+                },
+                {
+                    "title": "Button Color",
+                    "id": "buttonColor",
+                    "ai": {
+                        "name": "buttonColor",
+                        "description": "Background colour of the toolbar buttons."
+                    },
+                    "format": "bg-{{value}}",
+                    "themeColor": {
+                        "default": {
+                            "name": "brand",
+                            "brightness": 500
+                        }
+                    }
+                },
+                {
+                    "title": "Button Text",
+                    "id": "buttonTextColor",
+                    "ai": {
+                        "name": "buttonTextColor",
+                        "description": "Text and icon colour of the toolbar buttons."
+                    },
+                    "format": "text-{{value}}",
+                    "themeColor": {
+                        "default": {
+                            "name": "surface",
+                            "brightness": 50
+                        }
+                    }
+                }
+            ]
+        }
+    ]
+}

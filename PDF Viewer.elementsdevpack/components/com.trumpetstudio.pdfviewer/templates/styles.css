@@ -1,0 +1,8 @@
+/* The frame's background is the Background setting now, applied as a utility
+   class in the markup, so it is not stated here. A colour in this file would
+   have been a second answer to the same question — and the one the author
+   cannot reach from the Inspector. */
+.rw-pdf-frame {
+    border: 0;
+    display: block;
+}

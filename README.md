@@ -1,6 +1,6 @@
 # PDF Viewer for RapidWeaver Elements
 
-A PDF reader you drop onto a page: a titled frame with the document inside, and
+A PDF reader you drop onto a [RapidWeaver Elements](https://www.realmacsoftware.com/elements) page: a titled frame with the document inside, and
 an optional toolbar underneath for printing, downloading, and emailing a link.
 
 No PHP required — the page can be plain `.html`. Free, MIT licensed.
@@ -143,7 +143,7 @@ rather than dropping it to the top of the page.
 
 ## Requirements
 
-RapidWeaver Elements. No PHP, no server configuration, no build step, no external
+[RapidWeaver Elements](https://www.realmacsoftware.com/elements). No PHP, no server configuration, no build step, no external
 services. Cross-origin PDFs need CORS headers on the host for inline display on
 phones and tablets — see above.
 

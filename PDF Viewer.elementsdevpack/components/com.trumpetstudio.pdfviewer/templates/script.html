@@ -319,16 +319,25 @@ window.rwPdfViewer = (function () {
        The card is not a consolation prize on iOS. Open PDF hands the file to
        Quick Look, which pinch-zooms, pages through the whole document, prints
        and shares — a better reader than the canvas viewer it stands in for. */
-    function inlineFallback(stage, url) {
+    function inlineFallback(stage, url, why) {
+        /* The blocked fetch is the one failure the header advice is about, and it
+           arrives as a TypeError. Blaming it for a missing or corrupt file sent an
+           author looking in entirely the wrong place. */
         if (window.console && console.warn) {
-            console.warn('[PDF Viewer] pdf.js could not read "' + url + '". If ' +
-                'that file is on another domain, its server must send an ' +
-                'Access-Control-Allow-Origin header before phones and tablets ' +
-                'can show it in the page. Hosting the PDF on the same site as ' +
-                'the page avoids this entirely.');
+            if (why && why.name && why.name !== 'TypeError') {
+                console.warn('[PDF Viewer] "' + url + '" could not be shown: ' +
+                    why.name + (why.message ? ', ' + why.message : '') + '.');
+            } else {
+                console.warn('[PDF Viewer] pdf.js could not read "' + url + '". If ' +
+                    'that file is on another domain, its server must send an ' +
+                    'Access-Control-Allow-Origin header before phones and tablets ' +
+                    'can show it in the page. Hosting the PDF on the same site as ' +
+                    'the page avoids this entirely.');
+            }
         }
 
         var pal = chromeFor(stage);
+        stage.removeAttribute('aria-busy');
         stage.innerHTML = '';
         stage.appendChild(openCard(url, pal));
     }
@@ -339,11 +348,16 @@ window.rwPdfViewer = (function () {
        One ranged byte settles the same question first: a browser that refuses
        this refuses getDocument() too, for the same reason and at the same wall.
 
-       Deliberately narrow. Only a rejected promise short-circuits — a network or
-       CORS failure, where there is no response to look at. Any HTTP reply at all,
-       404 and 403 included, is passed through to pdf.js, which reads the body and
-       says something more useful about a missing or corrupt file than a bare
-       status could. Reachability is the whole of what is being asked.
+       Deliberately narrow. A rejected promise short-circuits — a network or CORS
+       failure, where there is no response to look at — and so does a 404 or 410,
+       the two replies that say outright there is no file, because there is no
+       point paying for pdf.js to reach the same card. Any other reply is passed
+       through to pdf.js, because some hosts answer a ranged request oddly and
+       serve the file perfectly well anyway.
+
+       Fifteen seconds is a host that has stopped answering. The reader would
+       otherwise wait with no end in sight, so it counts as a failure, and the card
+       still offers them the file.
 
        Range is what makes this preflighted when cross-origin, which is the point:
        it fails in the same way, at the same hop, as the read it stands in for. A
@@ -355,14 +369,68 @@ window.rwPdfViewer = (function () {
        pdf.js fail the way it did before, rather than block the path on it. */
     function probe(url) {
         if (!window.fetch) return Promise.resolve();
-        return fetch(url, { headers: { 'Range': 'bytes=0-0' } }).then(function (r) {
+        var stop = window.AbortController ? new window.AbortController() : null;
+        var timer = stop ? setTimeout(function () { stop.abort(); }, 15000) : 0;
+        var options = { headers: { 'Range': 'bytes=0-0' } };
+        if (stop) { options.signal = stop.signal; }
+        return fetch(url, options).then(function (r) {
+            clearTimeout(timer);
             if (r.body && r.body.cancel) {
                 try { r.body.cancel(); } catch (e) {}
+            }
+            if (r.status === 404 || r.status === 410) {
+                var gone = new Error('the server answered ' + r.status);
+                gone.name = 'FileNotFound';
+                throw gone;
             }
         });
     }
 
+    /* Between the tap and the first page there may be a 1.4 MB renderer and a slow
+       host, and the stage used to stay blank for all of it, with nothing to say
+       anything was happening. The file is one tap away the whole time. */
+    function showLoading(stage) {
+        var pal = chromeFor(stage);
+        stage.setAttribute('aria-busy', 'true');
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'position:absolute;inset:0;display:flex;' +
+            'flex-direction:column;align-items:center;justify-content:center;' +
+            'gap:12px;padding:24px;text-align:center;color:' + pal.text + ';' +
+            'font:400 15px system-ui,-apple-system,sans-serif;';
+        var note = document.createElement('p');
+        note.setAttribute('role', 'status');
+        note.textContent = 'Loading…';
+        note.style.cssText = 'margin:0;';
+        wrap.appendChild(note);
+        wrap.appendChild(openLink(stage.dataset.rwPdfUrl || '', 'Open PDF', 'color:inherit;text-decoration:underline;'));
+        stage.appendChild(wrap);
+    }
+
     function mobileViewer(stage, url, title) {
+        /* pdf.js fetches a character map when a document names one of the
+           predefined CJK encodings, and the map files do not ship with this pack:
+           they are 1.6 MB, published to every site, for a rare case. Without one
+           that text is silently left off the page, with a normal-looking counter
+           and nothing to tell the reader anything is missing. pdf.js only ever
+           asks this factory when a document needs a map, so being asked is the
+           signal, and the reader gets the card instead: the browser's own PDF
+           reader shows such text correctly. */
+        var stopViewer = null;
+        var gaveUp = false;
+        function NoCharacterMaps() {}
+        NoCharacterMaps.prototype.fetch = function () {
+            var missing = new Error('this document needs character maps this pack does not include');
+            missing.name = 'NoCharacterMaps';
+            if (!gaveUp) {
+                gaveUp = true;
+                setTimeout(function () {
+                    if (stopViewer) { stopViewer(); }
+                    inlineFallback(stage, url, missing);
+                }, 0);
+            }
+            return Promise.reject(missing);
+        };
+
         probe(url).then(function () {
             return loadLib();
         }).then(function (pdfjsLib) {
@@ -391,12 +459,14 @@ window.rwPdfViewer = (function () {
                 worker: workerFor(pdfjsLib),
                 isEvalSupported: false,
                 disableStream: true,
-                disableAutoFetch: true
+                disableAutoFetch: true,
+                CMapReaderFactory: NoCharacterMaps
             }).promise;
         }).then(function (pdf) {
             var state = { page: 1, zoom: 1 };
             var pal = chromeFor(stage);
 
+            stage.removeAttribute('aria-busy');
             stage.innerHTML = '';
 
             /* Transparent rather than a colour of its own: the stage it covers
@@ -454,6 +524,17 @@ window.rwPdfViewer = (function () {
                 spoken.textContent = 'Page ' + n + ' of ' + of;
                 canvas.setAttribute('aria-label',
                     'Page ' + n + ' of ' + of + (title ? ', ' + title : ''));
+                /* aria-disabled rather than disabled: a button that disables
+                   itself as it is pressed throws the keyboard user's focus away. */
+                atLimit(prevBtn, n <= 1);
+                atLimit(nextBtn, n >= of);
+                atLimit(zoomOutBtn, state.zoom <= 0.5);
+                atLimit(zoomInBtn, state.zoom >= 4);
+            }
+            function atLimit(btn, yes) {
+                if (!btn) return;
+                btn.setAttribute('aria-disabled', yes ? 'true' : 'false');
+                btn.style.opacity = yes ? '0.4' : '';
             }
 
             /* The same route to the file the failure card offers, kept in reach
@@ -497,6 +578,11 @@ window.rwPdfViewer = (function () {
 
             var rendering = false;
             var pending = false;
+            /* The page on screen, whose decoded images are let go when the reader
+               moves to another. pdf.js itself only does that for images over 10 MB,
+               so paging through a scanned book held every page visited: 233 MB by
+               page 30 of a 150 dpi scan, measured. Going back redraws it. */
+            var lastPage = null;
             function render() {
                 /* A render already in flight is not a reason to drop this one.
                    The caller has already advanced state.page, so returning early
@@ -515,6 +601,8 @@ window.rwPdfViewer = (function () {
                 }
                 rendering = true;
                 pdf.getPage(state.page).then(function (page) {
+                    if (lastPage && lastPage !== page) { lastPage.cleanup(); }
+                    lastPage = page;
                     var base = page.getViewport({ scale: 1 });
                     var fit = width / base.width;
                     var vp = page.getViewport({ scale: fit * state.zoom });
@@ -537,25 +625,32 @@ window.rwPdfViewer = (function () {
                     }
                 }).then(function () {
                     rendering = false;
+                    /* Also after a failure, so the counter names the page asked
+                       for rather than the one before it. */
+                    showPage();
                     if (pending) { pending = false; render(); }
                 });
             }
 
-            bar.appendChild(makeBtn('‹', 'Previous page', pal, function () {
+            var prevBtn = makeBtn('‹', 'Previous page', pal, function () {
                 if (state.page > 1) { state.page--; scroller.scrollTop = 0; render(); }
-            }));
-            bar.appendChild(label);
-            bar.appendChild(makeBtn('›', 'Next page', pal, function () {
+            });
+            var nextBtn = makeBtn('›', 'Next page', pal, function () {
                 if (state.page < pdf.numPages) { state.page++; scroller.scrollTop = 0; render(); }
-            }));
-            bar.appendChild(makeBtn('−', 'Zoom out', pal, function () {
+            });
+            var zoomOutBtn = makeBtn('−', 'Zoom out', pal, function () {
                 state.zoom = Math.max(0.5, state.zoom / 1.25);
                 render();
-            }));
-            bar.appendChild(makeBtn('+', 'Zoom in', pal, function () {
+            });
+            var zoomInBtn = makeBtn('+', 'Zoom in', pal, function () {
                 state.zoom = Math.min(4, state.zoom * 1.25);
                 render();
-            }));
+            });
+            bar.appendChild(prevBtn);
+            bar.appendChild(label);
+            bar.appendChild(nextBtn);
+            bar.appendChild(zoomOutBtn);
+            bar.appendChild(zoomInBtn);
             bar.appendChild(openBtn);
             showPage();
 
@@ -617,16 +712,21 @@ window.rwPdfViewer = (function () {
                 if (pdf && pdf.destroy) { try { pdf.destroy(); } catch (e) {} }
             }
 
+            var mo = null;
             if (window.MutationObserver) {
-                var mo = new MutationObserver(function () {
+                mo = new MutationObserver(function () {
                     if (!stage.isConnected) { teardown(); mo.disconnect(); }
                 });
                 mo.observe(document.body, { childList: true, subtree: true });
             }
+            stopViewer = function () {
+                teardown();
+                if (mo) { mo.disconnect(); }
+            };
 
             render();
-        }).catch(function () {
-            inlineFallback(stage, url);
+        }).catch(function (e) {
+            inlineFallback(stage, url, e);
         });
     }
 
@@ -646,6 +746,8 @@ window.rwPdfViewer = (function () {
             frame.setAttribute('data-src', url);
             frame.removeAttribute('src');
         }
+        stage.dataset.rwPdfUrl = url;
+        showLoading(stage);
         mobileViewer(stage, url, frame.getAttribute('title') || '');
     }
 

@@ -45,9 +45,11 @@
         <iframe class="rw-pdf-frame w-full h-full {{viewerBg}} {{viewerBgFallback}}" src="{{pdf.path}}" loading="{{lazyLoad}}" title="{{docTitle}}"></iframe>
       @endif
     @else
+      @if(edit)
       <div class="absolute inset-0 flex items-center justify-center text-sm text-gray-400 dark:text-surface-500">
         Drop a PDF into the Inspector (or onto this component) to get started
       </div>
+      @endif
     @endif
   </div>
 

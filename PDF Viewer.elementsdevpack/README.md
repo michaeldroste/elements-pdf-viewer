@@ -144,6 +144,23 @@ on the other server changes it.
 
 ## On phones and tablets
 
+### While it loads
+
+From build 29 a viewer says **Loading…** with an **Open PDF** link while the
+renderer and the file arrive, where the stage used to stay blank. A host that does
+not answer within 15 seconds, or that answers 404 or 410, goes straight to the Open
+PDF card without downloading the renderer first. The Previous, Next and zoom
+buttons dim at their limits, and a page you have moved away from lets go of its
+images, so a long scanned book no longer builds up memory as you page through it.
+
+### Chinese, Japanese and Korean text
+
+A PDF that names one of the predefined CJK encodings needs character map files the
+phone renderer does not carry: they would add 1.6 MB to every site for a rare case.
+Such a document opens on the **Open PDF** card, and the phone's own PDF reader shows
+it correctly. Up to build 28 its text was silently left off the page. PDFs that
+embed their fonts the usual way are not affected, and neither are desktop browsers.
+
 ### How much of the file a phone downloads
 
 The phone and tablet renderer asks for the document in pieces, using HTTP range
